@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+CLAUDE.md
+
+# local working files, not part of the project
+flash agent/
+
+# Nintendo-derived firmware: build from your own dump, never commit.
+# (nec_flash_routine.bin is the box's official routine and stays tracked.)
+firmware_dump*.bin
+debuggerfirmware*.bin
+*dualmode*.bin
