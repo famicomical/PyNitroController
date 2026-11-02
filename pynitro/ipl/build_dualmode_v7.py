@@ -33,8 +33,9 @@ This is the self-contained (pure-Python) build: it depends only on iplrepack.py
 arm-none-eabi toolchain. The boot stub is pre-assembled and embedded below.
 
 Usage:
-  python -m pynitro.ipl.build_dualmode_v7 [stock_firmware.bin] [out.bin]
+  python -m pynitro.ipl.build_dualmode_v7 [stock_firmware.bin] [out.bin] [--slow-card]
     defaults: firmware_dump.bin -> dualmode_ipl_v7.bin
+    --slow-card: alt-mode-only 4.2 MHz card clock for flashcarts (CARD_SLOW_STUB)
 """
 import os
 import sys
@@ -123,6 +124,23 @@ STUB_CODE = bytes.fromhex("04490988002901d1034b184700b5034b984700bd")   # 20 B
 assert len(STUB_CODE) == 20
 
 
+# ---------------------------------------------------------------------------
+# Optional "slow card" patch (--slow-card): alt mode only. IplInit's alt branch
+# ends with `str r1,[r2]` (r1 = header[0x60] | 0x406000, r2 = &header[0x60]) and
+# the hang we NOP; both words are the cart header's ROMCTRL settings (0x60 normal
+# commands, 0x64 KEY1 commands) that every later card transfer is built from.
+# Replace those 4 bytes with a `bl` to a 20-byte stub in the dead run (right
+# after the CRC correction word) that ORs ROMCTRL bit 27 (4.2 MHz card clock
+# instead of 6.7) into BOTH words before storing. Gives the box's slot-1 bridge
+# twice the setup time per bit; retail carts just boot a little slower. Meant for
+# flashcarts (tight FPGA timings) that fail through the bridge. Normal mode is
+# untouched (the branch is isOnDebugger == 0 only).
+#     ldr r3,=0x08000000 ; orrs r1,r3 ; str r1,[r2] ; ldr r0,[r2,#4]
+#     orrs r0,r3 ; str r0,[r2,#4] ; bx lr ; nop ; .word 0x08000000
+CARD_SLOW_STUB = bytes.fromhex("034b194311605068184350607047c04600000008")
+assert len(CARD_SLOW_STUB) == 20
+
+
 def make_stub(rev):
     """The 32-byte stub: position-independent code + its 3-word literal pool
     (isOnDebugger, IplCheckCardBootSkipUI ret-0 epilogue, IplSetBootFlag)."""
@@ -189,9 +207,10 @@ def supported_revisions():
                      for ts, r in REVISIONS.items())
 
 
-def build(base_fw, log=print):
+def build(base_fw, log=print, slow_card=False):
     """Build the dual-mode DS-IPL image from `base_fw` (raw stock firmware bytes)
-    and return the rebuilt image bytes.
+    and return the rebuilt image bytes. `slow_card` adds the alt-mode-only
+    4.2 MHz card-clock patch (see CARD_SLOW_STUB).
 
     Raises ValueError/RuntimeError on any validation failure: an unsupported
     build timestamp (no REVISIONS row), unexpected bytes at a patch site, or a
@@ -248,6 +267,18 @@ def build(base_fw, log=print):
     if bytes(a9[corr_off:corr_off + CORR_LEN]) != b"\x00" * CORR_LEN:
         raise RuntimeError("arm9 correction slot not dead-zero")
 
+    if slow_card:
+        site = rev["a9_hang"] - 2                      # `str r1,[r2]` + the NOPed hang
+        s2 = corr_off + CORR_LEN                       # 4-aligned, past the correction word
+        if s2 + len(CARD_SLOW_STUB) > RUN9_END:
+            raise RuntimeError("slow-card stub runs past the dead run")
+        if bytes(a9[s2:s2 + len(CARD_SLOW_STUB)]) != b"\x00" * len(CARD_SLOW_STUB):
+            raise RuntimeError("slow-card stub slot not dead-zero")
+        a9[s2:s2 + len(CARD_SLOW_STUB)] = CARD_SLOW_STUB
+        patch(a9, site, b"\x11\x60\xc0\x46", thumb_bl(BASE + site, BASE + s2),
+              "arm9 IplInit alt branch -> slow-card stub", log)
+        log("  ok slow-card stub: %d bytes @0x%x (ram 0x%x)" % (len(CARD_SLOW_STUB), s2, BASE + s2))
+
     def eval_joint(region):
         buf = bytearray(a9); buf[corr_off:corr_off + CORR_LEN] = region
         return iplrepack.crc16_modbus(bytes(buf) + bytes(a7))
@@ -265,7 +296,8 @@ def build(base_fw, log=print):
     va9, va7 = v["arm9boot"], v["arm7boot"]
     cj = iplrepack.crc16_modbus(va9 + va7)
     h = rev["a9_hang"]
-    code_ok = (va9[h:h + 2] == b"\xc0\x46" and va7[a7_off] == a7_new and
+    hang_ok = (va9[h - 2:h + 2] == bytes(a9[h - 2:h + 2]) if slow_card else va9[h:h + 2] == b"\xc0\x46")
+    code_ok = (hang_ok and va7[a7_off] == a7_new and
                va9[g9_off:g9_off + 2] == b"\xc0\x46" and va9[STUB_OFF:STUB_OFF + 2] != b"\x00\x00")
     # confirm arm7boot is byte-identical to v6's (only the functional gate patch)
     a7v6 = bytearray(a7_orig); a7v6[a7_off] = a7_new
@@ -280,8 +312,10 @@ def build(base_fw, log=print):
 
 
 def main():
-    stock = sys.argv[1] if len(sys.argv) > 1 else "firmware_dump.bin"
-    out = sys.argv[2] if len(sys.argv) > 2 else "dualmode_ipl_v7.bin"
+    slow_card = "--slow-card" in sys.argv
+    args = [a for a in sys.argv[1:] if a != "--slow-card"]
+    stock = args[0] if len(args) > 0 else "firmware_dump.bin"
+    out = args[1] if len(args) > 1 else "dualmode_ipl_v7.bin"
     if not os.path.exists(stock):
         sys.exit("stock firmware not found: %s\n"
                  "  pass it as the first argument: python -m pynitro.ipl.build_dualmode_v7 <stock.bin> [out.bin]"
@@ -289,7 +323,7 @@ def main():
 
     base_fw = open(stock, "rb").read()
     try:
-        img = build(base_fw)
+        img = build(base_fw, slow_card=slow_card)
     except (ValueError, RuntimeError) as e:
         sys.exit(str(e))
     open(out, "wb").write(img)

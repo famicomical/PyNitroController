@@ -105,6 +105,16 @@ additionally needs **`part345enc.py`** (the huffman *encoder*) next to
 it. With it present, `iplrepack.py` is a full byte-for-byte replacement for the
 C `iplrepack` tool.
 
+## Optional: `--slow-card` (flashcarts through the slot-1 bridge)
+
+Retail carts boot through the box's LCA2 slot-1 bridge, but flashcarts with tight FPGA timings
+(Acekard: card detected, blank banner) can fail on the KEY1/KEY2 transfers. `--slow-card` adds an
+alt-mode-only patch: `IplInit`'s alt branch, which already ORs bits into the cart header's ROMCTRL
+word at `0x60`, is redirected to a 20-byte stub in the same dead run that ORs ROMCTRL bit 27
+(4.2 MHz card clock instead of 6.7 MHz) into both header timing words (`0x60` normal commands,
+`0x64` KEY1 commands) before storing them. Retail carts just boot a little slower; normal mode is
+untouched. Experimental, not hardware-validated.
+
 ## Flash it
 
 > ⚠️ **Flash only in normal NEC mode, after a verified backup.** The DS IPL has **no DIP-4 recovery**
