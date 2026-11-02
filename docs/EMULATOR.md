@@ -375,6 +375,14 @@ Default values: X `196`, X dual `344`, Y `46`, Y dual `46`, gap `8`, interlaced,
 black background, cursor hidden, monitor state `0x16`. Flash the result with *Update
 Main Prog*.
 
+**Hooked 3.52 special case.** One rev-C unit carried a 3.52 Main with a 58-byte "AGB unlock" hook
+inside the alt-mode block (gate `bnz`→`br`, slot-1 pass-through / NTR reset / SIO-off / LCA3 / delay /
+`sub_11A4C` NOPed, `agb_setEjectState(0)` + `agb_setBusProtection(0)` instead), which left slot 1 dead
+in alt mode; reverting it to stock refused to boot there. `patch_main` recognises that exact block
+(`HOOKED_BLOCK`) and keeps it: the hook's NOPed `0x11952` slot is redirected to a stub that tests the
+alt flag `r29`, returns at once in normal mode (so normal mode stays byte-for-byte the hooked
+firmware) and in alt mode runs the stock block the hook removed, then the usual special-mode tail.
+
 **Main v2.30** (2004-09-20, header version word 230) is also supported, AGB-unlock only: its
 alt-mode block (`0x118F4`) ends in `st.h r0, 0[r28]` at `0x1192E` (release the NTR reset) with no
 final-init call to hijack, so that store is redirected to a stub in the free run at `0x105E8`

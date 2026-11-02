@@ -139,6 +139,35 @@ assert set(TABLE_KEYS) == set(DEFAULT_PARAMS) and len(TABLE_KEYS) == len(PARAM_S
 
 ORIG_REDIR = bytes([0x80, 0xff, 0xfa, 0x00])   # jarl sub_11a4c, lp
 
+# --- special case: a 3.52 Main carrying the "AGB unlock" hook found on an LCA3
+# rev-C EMULATOR (2026-11-02). The hook lives INSIDE the alt-mode block: the gate
+# `bnz` at 0x11918 became `br` (so the block runs in every mode), the NTR reset /
+# slot-1 pass-through / SIO-off / LCA3 / delay / sub_11A4C calls were NOPed, the
+# pass-through call retargeted to agb_setEjectState(0) and agb_setBusProtection(1)
+# turned into (0). Net: normal mode gets a GBA-slot unlock, alt mode never powers
+# slot 1. Rather than revert it (that Main refused to boot on the unit), keep it
+# byte-for-byte and redirect its NOPed 0x11952 slot to a stub that, ONLY when the
+# alt flag r29 is set, runs the stock block the hook removed and then the usual
+# special-mode tail. Normal mode: one call + return, otherwise unchanged.
+HOOK_BLOCK_NEC = 0x11918
+HOOKED_BLOCK = bytes.fromhex("c505441a4806ff0000000000003280ff3e572036100080ffc890013280ff6055003280ff2e560000000000000000000000000000000000000000")      # 0x11918..0x11951 as found on that unit
+assert len(HOOKED_BLOCK) == REDIR_NEC - HOOK_BLOCK_NEC
+NOP_REDIR = b"\x00\x00\x00\x00"            # what the hook left at 0x11952
+
+# stock alt-mode block callees (NEC addrs, from the vanilla block's own jarls)
+RELATEDTONTRRESET     = 0x119f8
+NTR_SETCARTPASSTHRU   = 0x176bc
+DEVICESTATEENABLE     = 0x1a9f6
+AGB_SETBUSPOWERSTATE  = 0x16e94
+AGB_SETBUSPROTECTION  = 0x16f68
+NTRSIO_SETENABLED     = 0x195ca
+LCA3_17E7A            = 0x17e7a
+TIMER_DELAY           = 0x19e6a
+
+
+def is_hooked(main_img):
+    return bytes(main_img[HOOK_BLOCK_NEC - BASE:REDIR_NEC - BASE]) == HOOKED_BLOCK
+
 # --- Main v2.30 (2004-09-20, header version word 230) profile: AGB unlock only ----
 # 2.30's alt-mode block (0x118F4) ends with `st.h r0, 0[r28]` @0x1192E (r28 =
 # 0xF84100A: release the NTR reset) and returns -- there is no sub_11A4C call to
@@ -193,6 +222,14 @@ def jarl_target(b, pc):
 
 PREPARE_LP4    = bytes([0x88, 0x07, 0x21, 0x00])   # prepare {lp}, 4
 DISPOSE_LP_RET = bytes([0x48, 0x06, 0x3f, 0x00])   # dispose 4, {lp}, [lp]  (return)
+CMP_R0_R29     = bytes([0xe0, 0xe9])               # cmp r0, r29  (r29 = alt-mode flag in sub_116F0)
+
+
+def bcond(cond, disp):                 # Bcond disp9 (e.g. bnz +8 = ca 05); cond: 0xA = nz
+    assert disp % 2 == 0 and -256 <= disp < 256
+    d = disp & 0x1FF
+    hw = ((d >> 4) << 11) | (0xB << 7) | (((d >> 1) & 7) << 4) | (cond & 0xF)
+    return bytes([hw & 0xFF, hw >> 8])
 
 
 def mov_imm5_r6(imm):                  # mov imm5, r6  (e.g. 01 32 = mov 1,r6)
@@ -238,7 +275,7 @@ def unpatched_xor(main_img):
     roff = REDIR_NEC - BASE
     tgt = jarl_target(bytes(van[roff:roff + 4]), REDIR_NEC)
     if tgt is not None and FREE_START <= tgt < FREE_END:
-        van[roff:roff + 4] = ORIG_REDIR
+        van[roff:roff + 4] = NOP_REDIR if is_hooked(van) else ORIG_REDIR
     return region_xor32(van)
 
 
@@ -266,11 +303,16 @@ def build_header(params):
     return bytes(h)
 
 
-def build_code(params):
+def build_code(params, hooked=False):
     """Emit the V850 code at CODE_NEC: original sub_11A4C, AGB full-unlock, then the
     video-out register configuration. r19 holds the 0x08000000 register base; r10 is
     the value scratch. All video writes happen AFTER the function calls so nothing is
-    live across a call."""
+    live across a call.
+
+    hooked=True (see HOOKED_BLOCK): the stub is entered in EVERY mode, so it first
+    tests the alt flag r29 and returns at once in normal mode; in alt mode it runs the
+    stock block the hook removed (same order as vanilla loc_11920), then continues as
+    the vanilla stub."""
     p = _norm_params(params)
     code = bytearray()
 
@@ -278,6 +320,17 @@ def build_code(params):
         code.extend(jarl(target, CODE_NEC + len(code)))
 
     code += PREPARE_LP4
+    if hooked:
+        code += CMP_R0_R29 + bcond(0xA, 6)         # bnz over the dispose
+        code += DISPOSE_LP_RET                     # normal mode: hook behaviour only
+        J(RELATEDTONTRRESET)
+        code += mov_imm5_r6(1); J(NTR_SETCARTPASSTHRU)
+        code += movea_r0(0x10, 6); J(DEVICESTATEENABLE)
+        code += mov_imm5_r6(1); J(AGB_SETBUSPOWERSTATE)
+        code += mov_imm5_r6(1); J(AGB_SETBUSPROTECTION)   # undo the hook's (0); stock state
+        code += mov_imm5_r6(0); J(NTRSIO_SETENABLED)
+        code += mov_imm5_r6(1); J(LCA3_17E7A)
+        code += movea_r0(0x7A8, 6); J(TIMER_DELAY)
     J(SUB_11A4C)                                   # original final init
     code += mov_imm5_r6(0); J(AGB_SETEJECTSTATE)   # eject = 0 (cart inserted)
     # Clear the AGB save buffer to 0xFF directly, WITHOUT agb_setBusProtection(0):
@@ -433,13 +486,19 @@ def patch_main(main_img, params=None, fix_checksum=True, target_xor=None):
 
     roff = REDIR_NEC - BASE
     tgt = jarl_target(bytes(img[roff:roff + 4]), REDIR_NEC)
+    hooked = is_hooked(img)
     header = build_header(params)
-    code = build_code(params)
+    code = build_code(params, hooked=hooked)
     blob = header + code
     if STUB_NEC + len(blob) > FREE_END:
         raise ValueError("stub (0x%X bytes) overruns the free region" % len(blob))
 
-    if tgt == SUB_11A4C:
+    if hooked and bytes(img[roff:roff + 4]) == NOP_REDIR:
+        # the known hook, redirect slot still NOPs -> the free run must be blank
+        soff = STUB_NEC - BASE
+        if any(b != 0xFF for b in img[soff:soff + len(blob)]):
+            raise ValueError("hooked Main but the stub region is not blank; refusing")
+    elif tgt == SUB_11A4C:
         # vanilla loc_11920 -> the bytes we will occupy must be blank
         soff = STUB_NEC - BASE
         if any(b != 0xFF for b in img[soff:soff + len(blob)]):
@@ -518,6 +577,27 @@ def _selftest():
     assert 0x16f68 not in targets, "stub must NOT call agb_setBusProtection (save-fix)"
     assert AGB_MEMSET in targets, "stub must memset the AGB save buffer (save-fix)"
     assert {SUB_11A4C, AGB_SETEJECTSTATE, AGB_16F0C} <= targets, "missing expected AGB calls"
+
+    # --- hooked-3.52 special case ---
+    hk = bytearray(b"\xFF" * MAIN_SIZE)
+    hk[0:19] = b"INTELLIGENT SYSTEMS"; hk[0x20:0x2C] = b"Main Program"
+    hk[HOOK_BLOCK_NEC - BASE:REDIR_NEC - BASE] = HOOKED_BLOCK
+    hk[REDIR_NEC - BASE:REDIR_NEC - BASE + 4] = NOP_REDIR
+    assert is_hooked(hk) and not stub_present(hk)
+    hp = patch_main(bytes(hk), DEFAULT_PARAMS)
+    assert is_hooked(hp) and stub_present(hp) and parse_stub(hp) == DEFAULT_PARAMS
+    assert hp[HOOK_BLOCK_NEC - BASE:REDIR_NEC - BASE] == HOOKED_BLOCK, "hook block must be untouched"
+    hc = build_code(DEFAULT_PARAMS, hooked=True)
+    assert hc[:12] == PREPARE_LP4 + CMP_R0_R29 + bcond(0xA, 6) + DISPOSE_LP_RET, "hooked stub gate"
+    assert bcond(0xA, 8) == bytes.fromhex("ca05"), "bcond encoder vs vanilla `bnz loc_11920`"
+    ht = {jarl_target(hc[i:i + 4], CODE_NEC + i) for i in range(0, len(hc) - 3, 2)} - {None}
+    assert {RELATEDTONTRRESET, NTR_SETCARTPASSTHRU, DEVICESTATEENABLE, AGB_SETBUSPOWERSTATE,
+            AGB_SETBUSPROTECTION, NTRSIO_SETENABLED, LCA3_17E7A, TIMER_DELAY,
+            SUB_11A4C, AGB_SETEJECTSTATE, AGB_MEMSET, AGB_16F0C} <= ht, "hooked stub callees"
+    # gate (8) + stock block (jarl + 5 x (mov + jarl) + 2 x (movea + jarl) = 50 bytes) on top of vanilla
+    assert len(hc) == len(build_code(DEFAULT_PARAMS)) + 8 + 50, "hooked stub size"
+    assert region_xor32(hp) == STOCK_MAIN_XOR and patch_main(hp, DEFAULT_PARAMS) == hp, "hooked: xor/idempotent"
+    assert build_code(DEFAULT_PARAMS, hooked=False) == build_code(DEFAULT_PARAMS), "vanilla code unchanged"
 
     # --- checksum correction ---
     van = bytearray(b"\xFF" * MAIN_SIZE)
