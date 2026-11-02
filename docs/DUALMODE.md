@@ -16,8 +16,8 @@ ARM9/ARM7 IPL modules and repacked with the bundled pure-Python [`iplrepack.py`]
 > choice, Wi-Fi config and owner info are carried over untouched (`iplrepack.py` inherits the
 > settings/wifi region from your dump verbatim; only the IPL boot code is repacked). The builder first
 > rejects any dump whose firmware-header build timestamp isn't one of the supported revisions
-> (`2006-02-20 20:59` = IPL build `VIB2.11 May 26 2005`, hardware-validated; `2004-10-05 11:07` =
-> `VIB2.11 Oct 5 2004`, ported by disassembly, not yet run on hardware), then verifies every patch
+> (`2006-02-20 20:59` = IPL build `VIB2.11 May 26 2005`; `2004-10-05 11:07` = `VIB2.11 Oct 5 2004`;
+> both hardware-validated), then verifies every patch
 > site's exact bytes (and the dead-padding slots) — the offsets are per-build, *not* unit-specific —
 > and aborts cleanly on any mismatch, so it never produces a bad image.
 
@@ -113,7 +113,7 @@ alt-mode-only patch: `IplInit`'s alt branch, which already ORs bits into the car
 word at `0x60`, is redirected to a 20-byte stub in the same dead run that ORs ROMCTRL bit 27
 (4.2 MHz card clock instead of 6.7 MHz) into both header timing words (`0x60` normal commands,
 `0x64` KEY1 commands) before storing them. Retail carts just boot a little slower; normal mode is
-untouched. Experimental, not hardware-validated.
+untouched. Hardware-validated: an Acekard that showed a blank banner through the bridge boots with it.
 
 ## Flash it
 

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Build dualmode_ipl_v7.bin = the v6 dual-mode IS-NITRO DS-IPL
 firmware, but with the part1/2 CRC16 restored to the STOCK value so it
-passes ISND's check. Supports the IPL builds listed in REVISIONS (2006-02-20,
-hardware-validated; 2004-10-05, ported by disassembly, see the table).
+passes ISND's check. Supports the IPL builds listed in REVISIONS (2006-02-20
+and 2004-10-05, both hardware-validated).
 
 ISND validates the DS-IPL by its CRC (it does NOT use an xor32-style check here
 -- that XOR-32 gate is the NEC Main). The v6 edits move the part1/2 CRC16 off
@@ -72,7 +72,7 @@ REVISIONS = {
         boot_off=0x7922, setbootflag=0x7554, ret0=0x794a,
         stub_off=0x104f8, run_end=0x1054c),
     bytes((0x07, 0x11, 0x05, 0x10, 0x04)): dict(      # 2004-10-05 11:07
-        name="IPL VIB2.11 Oct 5 2004", hw_validated=False,
+        name="IPL VIB2.11 Oct 5 2004", hw_validated=True,
         a9_hang=0x75e2, a7_gate=(0x64a, 0x09, 0x03), a9_gate=(0x742c, b"\x26\xd0"),
         boot_off=0x7454, setbootflag=0x70ac, ret0=0x747c,
         stub_off=0x10738, run_end=0x1078c),
@@ -134,7 +134,8 @@ assert len(STUB_CODE) == 20
 # instead of 6.7) into BOTH words before storing. Gives the box's slot-1 bridge
 # twice the setup time per bit; retail carts just boot a little slower. Meant for
 # flashcarts (tight FPGA timings) that fail through the bridge. Normal mode is
-# untouched (the branch is isOnDebugger == 0 only).
+# untouched (the branch is isOnDebugger == 0 only). Hardware-validated 2026-11-02:
+# an Acekard went from blank banner to booting on an LCA3 rev-C unit (2004 IPL).
 #     ldr r3,=0x08000000 ; orrs r1,r3 ; str r1,[r2] ; ldr r0,[r2,#4]
 #     orrs r0,r3 ; str r0,[r2,#4] ; bx lr ; nop ; .word 0x08000000
 CARD_SLOW_STUB = bytes.fromhex("034b194311605068184350607047c04600000008")
