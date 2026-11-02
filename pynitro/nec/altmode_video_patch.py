@@ -143,13 +143,19 @@ ORIG_REDIR = bytes([0x80, 0xff, 0xfa, 0x00])   # jarl sub_11a4c, lp
 # 2.30's alt-mode block (0x118F4) ends with `st.h r0, 0[r28]` @0x1192E (r28 =
 # 0xF84100A: release the NTR reset) and returns -- there is no sub_11A4C call to
 # hijack, and this build has no video-out support at all (no YOKO code), so the
-# stub re-does that store, opens the GBA slot (memset(0xF843000, 0xFF, 0x200), the
-# "protection off" fill of 2.30's own agb_setBusProtection) and sets the bus control
-# bit via 2.30's agb_16F0C equivalent. Function map verified by disassembly vs 3.52.
+# stub re-does that store, runs the same five final-init calls 3.52's alt mode makes
+# through sub_11A4C (and 2.30's own 0x8A reset handler makes on every DS reset) --
+# the last of them, the agb_17116 equivalent, is what programs the AGB bus (debug-RAM
+# offset, bus-power bits, NTR reset pulse) -- then opens the GBA slot
+# (memset(0xF843000, 0xFF, 0x200), the "protection off" fill of 2.30's own
+# agb_setBusProtection) and sets the bus control bit via 2.30's agb_16F0C equivalent.
+# Function map verified by disassembly vs 3.52.
 V230 = dict(
     version=230,
     hook=0x1192E, hook_orig=bytes.fromhex("7c070000"),   # st.h r0, 0[r28]
     free_start=0x105E8, free_end=0x115E8,                # 4 KiB 0xFF run (== 3.52's 0x10618 run)
+    # 3.52 sub_11A4C members: dbgprint_init, sub_182F6, sub_17C78, sub_174FE, agb_17116
+    final_init=(0x16470, 0x17E5C, 0x17C48, 0x17888, 0x169FA),
     memset=0x18590, agb_16f0c=0x16940, ntr_reset=0xF84100A,
     stock_xor=0xB46E7C58,                                 # region_xor32 of stock 2.30
 )
@@ -334,6 +340,8 @@ def build_code_230(code_nec):
 
     code += PREPARE_LP4
     code += mov_imm32(v["ntr_reset"], 10) + st_h(0, 0, 10)   # st.h r0, 0[r10]: hooked store
+    for f in v["final_init"]:                                # == 3.52's `jarl sub_11A4C`
+        J(f)
     code += mov_imm32(AGB_SRAM_BUF, 6)                       # memset(0xF843000, 0xFF, 0x200)
     code += movea_r0(AGB_SRAM_FILL, 7)
     code += movea_r0(AGB_SRAM_LEN, 8)
@@ -554,7 +562,10 @@ def _selftest():
     assert jarl_target(q[v["hook"] - BASE:v["hook"] - BASE + 4], v["hook"]) == code_nec
     c230 = build_code_230(code_nec)
     t230 = {jarl_target(c230[i:i + 4], code_nec + i) for i in range(0, len(c230) - 3, 2)} - {None}
-    assert {v["memset"], v["agb_16f0c"]} <= t230, "2.30 stub must call memset + agb_16F0C"
+    assert {v["memset"], v["agb_16f0c"]} | set(v["final_init"]) <= t230, "2.30 stub must call final-init + memset + agb_16F0C"
+    order = [jarl_target(c230[i:i + 4], code_nec + i) for i in range(0, len(c230) - 3, 2)]
+    order = [x for x in order if x is not None]
+    assert order == list(v["final_init"]) + [v["memset"], v["agb_16f0c"]], "2.30 stub call order"
     assert c230[4:14] == mov_imm32(v["ntr_reset"], 10) + st_h(0, 0, 10), "2.30 stub must redo the reset-release store"
     assert region_xor32(q) == v["stock_xor"], "2.30 patch must be checksum-neutral"
     assert patch_main(q) == q, "2.30 re-patch not idempotent"
