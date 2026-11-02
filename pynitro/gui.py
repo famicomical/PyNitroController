@@ -147,15 +147,28 @@ def op_identify_capture(n, log, progress=None):
 
 
 def op_nec_registers(n, log):
+    rev = n.lca3_revision()
+    log("  LCA3 rev    = 0x%02X (%s)  register map: %s"
+        % (rev, n.LCA3_REV_NAMES.get(rev, "?"), "rev<=C" if n.legacy_regs else "rev D"))
     r0 = n.read_nec_reg(n.REG_NITRO0) & 0xFF
     r1 = n.read_nec_reg(n.REG_NITRO1) & 0xFF
     ctrl = n.read_nec_reg(n.REG_IPL_SPI_CTRL) & 0xFF
-    log("  NITRO REG0  = 0x%02X  %s   reset=%d (1=normal)  cover/dbg=%d"
-        % (r0, format(r0, "08b"), (r0 >> 4) & 1, (r0 >> 1) & 1))
-    log("  NITRO REG1  = 0x%02X  %s   (power/boot_complete/write_protection)"
-        % (r1, format(r1, "08b")))
-    log("  IPL SPI CTRL= 0x%02X  %s   busy=%d cs=%d"
-        % (ctrl, format(ctrl, "08b"), (ctrl >> 7) & 1, (ctrl >> 6) & 1))
+    if n.legacy_regs:
+        log("  NITRO REG0  = 0x%02X  %s   (rev<=C: reset/cover/dbg bits not here)"
+            % (r0, format(r0, "08b")))
+        log("  NITRO REG1  = 0x%02X  %s   power=%d (bit5 inverted)"
+            % (r1, format(r1, "08b"), ((r1 >> 5) & 1) ^ 1))
+        log("  FLASH WP    = 0x%02X   write-protect %s"
+            % (n.read_nec_reg(n.REG_LEGACY_FLASH_WP) & 0xFF,
+               "OFF" if n.flash_write_protect_off() else "ON"))
+    else:
+        log("  NITRO REG0  = 0x%02X  %s   reset=%d (1=normal)  cover/dbg=%d"
+            % (r0, format(r0, "08b"), (r0 >> 4) & 1, (r0 >> 1) & 1))
+        log("  NITRO REG1  = 0x%02X  %s   (power/boot_complete/write_protection)"
+            % (r1, format(r1, "08b")))
+    log("  IPL SPI CTRL= 0x%02X  %s   busy=%d cs=%d  @0x%08X"
+        % (ctrl, format(ctrl, "08b"), (ctrl >> 7) & 1, (ctrl >> 6) & 1,
+           n.REG_IPL_SPI_CTRL))
 
 
 def op_reset(n, log):

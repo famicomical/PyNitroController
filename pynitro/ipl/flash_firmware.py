@@ -42,13 +42,12 @@ def main():
             raise ISNitroError("flash not responding (%s); aborting before any erase"
                               % jedec)
 
-        print("disabling flash write-protect (NITRO REG1 bit 0)...")
+        print("disabling flash write-protect (LCA3 rev %s)..."
+              % n.LCA3_REV_NAMES.get(n.lca3_revision(), "?"))
         n.set_flash_write_protect(False)
-        reg1 = n.read_nec_reg(n.REG_NITRO1) & 0xFF
-        print("NITRO REG1 = 0x%02X (write-protect %s)"
-              % (reg1, "OFF" if reg1 & n.FLASH_WP_BIT else "ON"))
-        if not (reg1 & n.FLASH_WP_BIT):
+        if not n.flash_write_protect_off():
             raise ISNitroError("could not disable write-protect; aborting before any erase")
+        print("write-protect OFF")
 
         print("chip-erasing (0x%02X) then programming %d sectors..."
               % (erase_opcode, len(data) // n.SECTOR_SIZE))
@@ -72,7 +71,7 @@ def main():
     finally:
         try:
             n.set_flash_write_protect(True)
-            print("flash write-protect restored (NITRO REG1 bit 0 cleared)")
+            print("flash write-protect restored")
         except Exception as e:
             print("  (warning: could not restore write-protect: %s)" % e)
         n.close()

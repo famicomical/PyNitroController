@@ -210,11 +210,38 @@ class ISNitro:
     # 16-bit accesses with only the low 8 bits valid. NOTE: some addresses
     # moved between hardware revisions — verify against your unit.
 
-    # 0x08000000 region (revision-dependent; these match the current doc)
-    REG_NITRO0 = 0x08000000   # reset / cover / debug_btn
+    # 0x08000000 region. The layout depends on the LCA3 (monitor FPGA) hardware
+    # revision -- the box's Main Program keys on it (getLCA3Revision: rev <= C
+    # vs rev D). These are the rev-D addresses; lca3_revision() switches the
+    # instance to the rev <= C map on first use.
+    REG_NITRO0 = 0x08000000   # reset / cover / debug_btn   (rev D only)
     REG_NITRO1 = 0x08000002   # power / boot_complete / write_protection
-    REG_IPL_SPI_CTRL = 0x08000004
-    REG_IPL_SPI_DATA = 0x08000006
+    REG_IPL_SPI_CTRL = 0x08000004          # rev <= C: 0x08000018
+    REG_IPL_SPI_DATA = 0x08000006          # rev <= C: 0x0800001A
+    REG_LEGACY_IPL_SPI_CTRL = 0x08000018
+    REG_LEGACY_IPL_SPI_DATA = 0x0800001A
+    REG_LEGACY_FLASH_WP = 0x08000004       # rev <= C: whole reg, 1 = protection OFF
+
+    DEVINFO_LCA3_REV = 0x3FE0A0   # Device Information block: LCA3 revision byte
+    LCA3_REV_NAMES = {0xFF: "A", 0xFE: "B", 0xFD: "C", 0xFB: "D"}
+    _lca3_rev = None
+
+    def lca3_revision(self):
+        """Return the LCA3 revision byte (0xFF=A, 0xFE=B, 0xFD=C, 0xFB=D) from
+        the Device Information block, cached. Rev <= C units (e.g. 2005-era
+        non-USG EMULATORs) use a different 0x08000000 register layout; this
+        switches the instance's IPL-SPI register addresses to match."""
+        if self._lca3_rev is None:
+            self._lca3_rev = self.read_nec_memory(self.DEVINFO_LCA3_REV, 1, 1)[0]
+            if self.legacy_regs:
+                self.REG_IPL_SPI_CTRL = self.REG_LEGACY_IPL_SPI_CTRL
+                self.REG_IPL_SPI_DATA = self.REG_LEGACY_IPL_SPI_DATA
+        return self._lca3_rev
+
+    @property
+    def legacy_regs(self):
+        """True on LCA3 rev A/B/C hardware (pre-rev-D register map)."""
+        return self._lca3_rev is not None and self._lca3_rev != 0xFB
     REG_COUNTER_LO = 0x08000028  # free-running counter, low byte
     REG_COUNTER_HI = 0x0800002A  # free-running counter, high byte
 
@@ -346,6 +373,7 @@ class ISNitro:
         raise ISNitroError("IPL SPI busy timeout")
 
     def ipl_spi_select(self, on):
+        self.lca3_revision()   # pick the register map for this hardware revision
         self.write_nec_reg(self.REG_IPL_SPI_CTRL,
                           (self.SPI_CS | self.SPI_XMIT) if on else 0)
 
@@ -388,7 +416,18 @@ class ISNitro:
 
         Each 0x03 READ command auto-increments within the chip, so chunking
         only affects how often ``progress`` fires, not correctness.
+
+        Raises ISNitroError if the flash does not answer (JEDEC 00/FF): the IPL
+        flash sits on the DS ARM7 SPI bus and is unreachable while the DS is
+        held in reset, in which case a dump would be 256 KiB of zeros.
         """
+        jedec = self.spi_read_jedec_id()
+        if jedec in (b"\x00\x00\x00", b"\xff\xff\xff"):
+            raise ISNitroError("flash not responding (JEDEC %s, LCA3 rev %s): the DS "
+                               "is probably held in reset -- release it (GUI 'Reset "
+                               "DS' or `python3 -m pynitro.isnitro --reset`) and retry"
+                               % (jedec.hex(),
+                                  self.LCA3_REV_NAMES.get(self.lca3_revision(), "?")))
         out = bytearray()
         while len(out) < length:
             n = min(chunk, length - len(out))
@@ -411,16 +450,30 @@ class ISNitro:
     FLASH_WP_BIT = 0x01   # NITRO REG1 bit 0: write-protect (SET = protection OFF)
 
     def set_flash_write_protect(self, protect):
-        """Toggle the IS-NITRO flash write-protect (NITRO REG1 bit 0).
+        """Toggle the IS-NITRO flash write-protect.
 
-        protect=False sets bit 0 (protection OFF, writes allowed); protect=True
-        clears it (protection ON). Read-modify-write so only bit 0 changes —
-        the other REG1 bits (incl. the powercycle-capable `power` bit) are left
-        untouched, so no 1->0 transition can fire.
+        Rev D: NITRO REG1 bit 0. protect=False sets bit 0 (protection OFF,
+        writes allowed); protect=True clears it (protection ON).
+        Read-modify-write so only bit 0 changes — the other REG1 bits (incl.
+        the powercycle-capable `power` bit) are left untouched, so no 1->0
+        transition can fire.
+        Rev <= C: the flag is the whole register at 0x08000004 (1 = OFF), as
+        the Main Program's 0xAD/25 handler writes it.
         """
+        self.lca3_revision()
+        if self.legacy_regs:
+            self.write_nec_reg(self.REG_LEGACY_FLASH_WP, 0 if protect else 1)
+            return
         reg = self.read_nec_reg(self.REG_NITRO1) & 0xFF
         reg = (reg & ~self.FLASH_WP_BIT) if protect else (reg | self.FLASH_WP_BIT)
         self.write_nec_reg(self.REG_NITRO1, reg)
+
+    def flash_write_protect_off(self):
+        """True if the flash write-protect is currently OFF (writes allowed).
+        Reads bit 0 of the revision-appropriate register."""
+        self.lca3_revision()
+        reg = self.REG_LEGACY_FLASH_WP if self.legacy_regs else self.REG_NITRO1
+        return bool(self.read_nec_reg(reg) & self.FLASH_WP_BIT)
 
     def _spi_send(self, payload):
         """Write-only SPI transaction: clock the bytes out, ignore MISO, no

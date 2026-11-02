@@ -134,9 +134,25 @@ The checksums are computed by the box when asked; they are not stored in flash.
 
 ## Registers (`0x08000000`)
 
-16-bit accesses, only the low 8 bits valid. Some addresses moved between hardware
-revisions (the IPL SPI control register was at `0x08000018` on old units), so check
-against your unit before writing.
+16-bit accesses, only the low 8 bits valid. **The layout depends on the LCA3 (monitor
+board) hardware revision** — the Main Program (v3.52) keys every access on
+`getLCA3Revision()` (device-info byte `0x3FE0A0`: `FF` A, `FE` B, `FD` C, `FB` D), with
+one map for rev ≤ C and another for rev D. The table below is the **rev D** map (the
+reference unit). Rev ≤ C differences, recovered from the Main disassembly:
+
+| Function | rev D | rev ≤ C (e.g. 2005 non-USG EMULATOR, LCA3 `FD`) |
+|---|---|---|
+| IPL SPI control / data | `0x08000004` / `06` | `0x08000018` / `1A` (same bit layout) |
+| flash write-protect | REG 1 bit 0 (set = off) | whole `0x08000004` = 1 (off) / 0 (on) |
+| cover / debug button | REG 0 | `0x0800000A` bit 6 / bit 7 |
+| DS reset (cmd `0x8A`) | REG 0 bit 4 + LCA1 `0x0F84100A` | LCA1 `0x0F84100A` only (REG 0 untouched) |
+| power (REG 1 bit 5) | direct | **inverted** |
+| wifi enable | REG 1 | `0x08000006` bit 0 |
+| LCA3 forward/debug enable | REG 1 bit 1 (cleared = on) | `0x08000008` bit 0 |
+
+`ISNitro.lca3_revision()` reads the byte once and switches the IPL-SPI and write-protect
+addresses automatically; a rev ≤ C unit driven with the rev D map reads JEDEC `000000`
+(and its data writes land in the wifi-enable register).
 
 | Address | Name | Notes |
 |---|---|---|

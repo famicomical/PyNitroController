@@ -171,6 +171,10 @@ def build(base_fw, log=print, check_timestamp=True):
     patch offsets were derived against."""
     base_fw = bytes(base_fw)
 
+    if not any(base_fw[:0x200]):
+        raise ValueError("firmware header is all zeros: this is a blank dump, not "
+                         "firmware (flash JEDEC read 000000 when it was dumped). "
+                         "Re-dump with the current driver and the DS running.")
     if check_timestamp:
         ts = read_build_timestamp(base_fw)
         if ts != EXPECTED_BUILD_TS:
