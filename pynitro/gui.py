@@ -553,18 +553,16 @@ class App:
         except ValueError as e:
             messagebox.showerror("Build DualMode IPL", "Not a DS firmware image:\n%s" % e)
             return
-        if ts != bdm.EXPECTED_BUILD_TS:
+        if ts not in bdm.REVISIONS:
             messagebox.showerror(
                 "Build DualMode IPL — unsupported firmware",
                 "This firmware's build timestamp is\n\n"
                 "    %s  (%s)\n\n"
-                "but the dual-mode patch was built for the supported IPL revision\n\n"
-                "    %s  (%s)\n\n"
-                "The patch offsets are only valid for that exact IPL revision, so "
+                "but the dual-mode patch only supports these IPL revisions:\n\n"
+                "    %s\n\n"
+                "The patch offsets are only valid for those exact IPL builds, so "
                 "building from this image is refused."
-                % (ts.hex(), bdm.format_build_timestamp(ts),
-                   bdm.EXPECTED_BUILD_TS.hex(),
-                   bdm.format_build_timestamp(bdm.EXPECTED_BUILD_TS)))
+                % (ts.hex(), bdm.format_build_timestamp(ts), bdm.supported_revisions()))
             return
 
         out = filedialog.asksaveasfilename(

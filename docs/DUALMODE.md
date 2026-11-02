@@ -15,10 +15,11 @@ ARM9/ARM7 IPL modules and repacked with the bundled pure-Python [`iplrepack.py`]
 > dump, and **their IPL settings are preserved** — calibration, language, the Start-up Auto/Manual
 > choice, Wi-Fi config and owner info are carried over untouched (`iplrepack.py` inherits the
 > settings/wifi region from your dump verbatim; only the IPL boot code is repacked). The builder first
-> rejects any dump whose firmware-header build timestamp isn't the supported `2006-02-20 20:59`, then
-> verifies every patch site's exact bytes (and the dead-padding slots) so the offsets line up with the
-> IS-NITRO debug IPL build `VIB2.11May 26 2005` — the same on every unit with this firmware, *not*
-> unit-specific — and aborts cleanly on any mismatch, so it never produces a bad image.
+> rejects any dump whose firmware-header build timestamp isn't one of the supported revisions
+> (`2006-02-20 20:59` = IPL build `VIB2.11 May 26 2005`, hardware-validated; `2004-10-05 11:07` =
+> `VIB2.11 Oct 5 2004`, ported by disassembly, not yet run on hardware), then verifies every patch
+> site's exact bytes (and the dead-padding slots) — the offsets are per-build, *not* unit-specific —
+> and aborts cleanly on any mismatch, so it never produces a bad image.
 
 ## What it patches
 
@@ -82,10 +83,11 @@ Requirements:
 - A firmware **dump from your own unit** running the supported IPL revision. The builder gates on this
   in two layers and **never produces a bad image**:
   - **Version guard (checked first):** the DS firmware header carries a 5-byte BCD **build timestamp**
-    at offset `0x18`. The supported IPL revision reads **`2006-02-20 20:59`** (the same image
-    carries IPL code build `VIB2.11May 26 2005` at arm9boot `0x101c4`). A dump whose header timestamp
-    differs is refused up front — the GUI shows both timestamps and stops, the CLI exits non-zero —
-    because the fixed patch offsets are only valid for that exact revision.
+    at offset `0x18`, which selects the offset row in `REVISIONS`. Supported: **`2006-02-20 20:59`**
+    (IPL code build `VIB2.11May 26 2005` at arm9boot `0x101c4`; the table above) and
+    **`2004-10-05 11:07`** (`VIB2.11Oct  5 2004` at arm9boot `0x10414`; sites arm9 `0x75e2` /
+    `0x742c` (`26 D0`) / `0x7454`, arm7 `0x64a` (`09→03`), stub `0x10738`). Any other timestamp
+    is refused up front — the GUI lists the supported revisions and stops, the CLI exits non-zero.
   - **Per-site verification:** it then checks the original bytes at every patch site and the joint CRC,
     aborting cleanly on any mismatch.
 

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Build dualmode_ipl_v7.bin = the v6 dual-mode IS-NITRO DS-IPL
-firmware, but with the part1/2 CRC16 restored to the STOCK value 0xB4DD so it
-passes ISND's check.
+firmware, but with the part1/2 CRC16 restored to the STOCK value so it
+passes ISND's check. Supports the IPL builds listed in REVISIONS (2006-02-20,
+hardware-validated; 2004-10-05, ported by disassembly, see the table).
 
 ISND validates the DS-IPL by its CRC (it does NOT use an xor32-style check here
 -- that XOR-32 gate is the NEC Main). The v6 edits move the part1/2 CRC16 off
@@ -41,23 +42,40 @@ import sys
 from . import iplrepack
 
 BASE = 0x02320000               # arm9boot load address (ram)
-
-STUB_OFF = 0x104f8              # ram 0x23304f8 (v6 stub, hardware-validated dead space)
-BOOT_OFF = 0x7922              # `bl IplSetBootFlag(BOOT_NITRO_CARD)`; ram 0x2327922
-RUN9_END = 0x1054c             # end of the 0x104f5 dead run (exclusive)
 CORR_LEN = 16                  # arm9 correction bytes (>=2 needed; 16 = ample margin)
+ISONDEBUGGER = 0x027FF814      # SHARED_WORK isOnDebugger (same in every build)
 
 # ---------------------------------------------------------------------------
-# Build-timestamp guard. The v6/v7 patch offsets above are valid ONLY for the
-# exact IPL revision they were derived against; any other firmware
-# version would have different code at those offsets. The DS firmware header
-# stores a 5-byte BCD build timestamp at 0x18 (minute, hour, day, month,
-# year-2000). build() refuses any input whose timestamp differs, so a mismatched
-# IPL revision can never be silently mis-patched.
+# Per-IPL-revision patch offsets. The DS firmware header stores a 5-byte BCD
+# build timestamp at 0x18 (minute, hour, day, month, year-2000); it selects the
+# row. Every offset is into the *decompressed* arm9boot/arm7boot modules.
+#   a9_hang   : IplInit `b .` (FE E7)                     -> NOP
+#   a7_gate   : (offset, old, new) of the isOnDebugger `beq` displacement in
+#               the ARM7 resource-init block -> retarget to the flash-load bl
+#   a9_gate   : (offset, old bytes) of the `beq` in IplCheckCardBootSkipUI -> NOP
+#   boot_off  : `bl IplSetBootFlag(BOOT_NITRO_CARD)` in IplCheckCardBootSkipUI
+#   setbootflag, ret0 : IplSetBootFlag entry / IplCheckCardBootSkipUI return-0
+#               epilogue (stub literals)
+#   stub_off, run_end : 4-aligned start of the dead zero run that takes the
+#               stub + CRC correction, and the run's end (exclusive)
+# The 2004 row was derived from the 2006 one by matching the same functions
+# in the older build (every site, callee and the IplLaunchNitroCard selector
+# verified by disassembly); the 2004 build lacks the SYSMi_IsDebuggerBanner-
+# ViewMode check and one ARM7 predicate, hence the different gate bytes.
 OFF_BUILD_TS = 0x18
 BUILD_TS_LEN = 5
-# supported IPL revision header 0x18: 59 20 20 02 06  ->  2006-02-20 20:59
-EXPECTED_BUILD_TS = bytes((0x59, 0x20, 0x20, 0x02, 0x06))
+REVISIONS = {
+    bytes((0x59, 0x20, 0x20, 0x02, 0x06)): dict(      # 2006-02-20 20:59
+        name="IPL VIB2.11 May 26 2005", hw_validated=True,
+        a9_hang=0x7ab2, a7_gate=(0x6e8, 0x0D, 0x07), a9_gate=(0x78d0, b"\x3b\xd0"),
+        boot_off=0x7922, setbootflag=0x7554, ret0=0x794a,
+        stub_off=0x104f8, run_end=0x1054c),
+    bytes((0x07, 0x11, 0x05, 0x10, 0x04)): dict(      # 2004-10-05 11:07
+        name="IPL VIB2.11 Oct 5 2004", hw_validated=False,
+        a9_hang=0x75e2, a7_gate=(0x64a, 0x09, 0x03), a9_gate=(0x742c, b"\x26\xd0"),
+        boot_off=0x7454, setbootflag=0x70ac, ret0=0x747c,
+        stub_off=0x10738, run_end=0x1078c),
+}
 
 
 def _bcd(b):
@@ -92,20 +110,25 @@ def format_build_timestamp(ts):
 #         ldrh r1, [r1]
 #         cmp  r1, #0
 #         bne  .Lboot                 @ normal/debugger mode -> boot as before
-#         ldr  r3, =0x0232794B        @ alt mode -> IplCheckCardBootSkipUI ret-0 (thumb)
+#         ldr  r3, =<ret0|1>          @ alt mode -> IplCheckCardBootSkipUI ret-0 (thumb)
 #         bx   r3
 #     .Lboot:
 #         push {lr}                   @ lr = 0x2327926 (cont. at IplStartBootNitroCard)
-#         ldr  r3, =0x02327555        @ IplSetBootFlag (thumb); r0 still = 0x20
+#         ldr  r3, =<IplSetBootFlag|1> @ (thumb); r0 still = 0x20
 #         blx  r3
 #         pop  {pc}
 #         .ltorg
 # ---------------------------------------------------------------------------
-STUB = bytes.fromhex(
-    "04490988002901d1034b184700b5034b"
-    "984700bd14f87f024b79320255753202"
-)
-assert len(STUB) == 32, "embedded stub is %d bytes, expected 32" % len(STUB)
+STUB_CODE = bytes.fromhex("04490988002901d1034b184700b5034b984700bd")   # 20 B
+assert len(STUB_CODE) == 20
+
+
+def make_stub(rev):
+    """The 32-byte stub: position-independent code + its 3-word literal pool
+    (isOnDebugger, IplCheckCardBootSkipUI ret-0 epilogue, IplSetBootFlag)."""
+    import struct
+    return STUB_CODE + struct.pack("<III", ISONDEBUGGER,
+                                   (BASE + rev["ret0"]) | 1, (BASE + rev["setbootflag"]) | 1)
 
 
 # ---- GF(2) XOR-basis affine solve: choose padding bits so eval_crc() == target ----
@@ -160,32 +183,40 @@ def patch(buf, off, old, new, what, log=print):
     log("  ok %s: @0x%x %s -> %s" % (what, off, old.hex(), new.hex()))
 
 
-def build(base_fw, log=print, check_timestamp=True):
+def supported_revisions():
+    """Human-readable list of the IPL revisions in REVISIONS."""
+    return ", ".join("%s (%s)" % (format_build_timestamp(ts), r["name"])
+                     for ts, r in REVISIONS.items())
+
+
+def build(base_fw, log=print):
     """Build the dual-mode DS-IPL image from `base_fw` (raw stock firmware bytes)
     and return the rebuilt image bytes.
 
-    Raises ValueError/RuntimeError on any validation failure: a build-timestamp
-    mismatch, unexpected bytes at a patch site, or a failed CRC/end-to-end check.
-    When check_timestamp is True (default), the input's firmware-header build
-    timestamp must equal EXPECTED_BUILD_TS — the supported IPL revision the
-    patch offsets were derived against."""
+    Raises ValueError/RuntimeError on any validation failure: an unsupported
+    build timestamp (no REVISIONS row), unexpected bytes at a patch site, or a
+    failed CRC/end-to-end check."""
     base_fw = bytes(base_fw)
 
     if not any(base_fw[:0x200]):
         raise ValueError("firmware header is all zeros: this is a blank dump, not "
                          "firmware (flash JEDEC read 000000 when it was dumped). "
                          "Re-dump with the current driver and the DS running.")
-    if check_timestamp:
-        ts = read_build_timestamp(base_fw)
-        if ts != EXPECTED_BUILD_TS:
-            raise ValueError(
-                "firmware build timestamp %s (%s) does not match the supported "
-                "IPL revision %s (%s).\nThe dual-mode patch offsets are only "
-                "valid for that exact IPL revision; refusing to build."
-                % (ts.hex(), format_build_timestamp(ts),
-                   EXPECTED_BUILD_TS.hex(), format_build_timestamp(EXPECTED_BUILD_TS)))
-        log("build timestamp %s (%s) matches the supported IPL revision"
-            % (ts.hex(), format_build_timestamp(ts)))
+    ts = read_build_timestamp(base_fw)
+    rev = REVISIONS.get(ts)
+    if rev is None:
+        raise ValueError(
+            "firmware build timestamp %s (%s) is not a supported IPL revision.\n"
+            "Supported: %s.\nThe dual-mode patch offsets are only valid for "
+            "those exact IPL builds; refusing to build."
+            % (ts.hex(), format_build_timestamp(ts), supported_revisions()))
+    log("build timestamp %s (%s): %s%s"
+        % (ts.hex(), format_build_timestamp(ts), rev["name"],
+           "" if rev["hw_validated"] else "  [patch set NOT yet hardware-validated]"))
+    STUB = make_stub(rev)
+    STUB_OFF, BOOT_OFF, RUN9_END = rev["stub_off"], rev["boot_off"], rev["run_end"]
+    a7_off, a7_old, a7_new = rev["a7_gate"]
+    g9_off, g9_old = rev["a9_gate"]
 
     info = iplrepack.unpack(base_fw)
     a9_orig, a7_orig = info["arm9boot"], info["arm7boot"]
@@ -200,15 +231,15 @@ def build(base_fw, log=print, check_timestamp=True):
     if bytes(a9[STUB_OFF:STUB_OFF + len(STUB)]) != b"\x00" * len(STUB):
         raise ValueError("stub destination @0x%x is not zero-filled" % STUB_OFF)
     log("v2 base patches:")
-    patch(a9, 0x7ab2, b"\xfe\xe7", b"\xc0\x46", "arm9 IplInit hang->nop", log)
-    patch(a7, 0x6e8,  b"\x0d",     b"\x07",     "arm7 resource gate", log)
+    patch(a9, rev["a9_hang"], b"\xfe\xe7", b"\xc0\x46", "arm9 IplInit hang->nop", log)
+    patch(a7, a7_off, bytes([a7_old]), bytes([a7_new]), "arm7 resource gate", log)
     log("v4 gate patch:")
-    patch(a9, 0x78d0, b"\x3b\xd0", b"\xc0\x46", "arm9 !isOnDebugger beq->nop", log)
+    patch(a9, g9_off, g9_old, b"\xc0\x46", "arm9 !isOnDebugger beq->nop", log)
     log("v6 boot-cut patch:")
     a9[STUB_OFF:STUB_OFF + len(STUB)] = STUB
     log("  ok stub: %d bytes @0x%x (ram 0x%x)" % (len(STUB), STUB_OFF, BASE + STUB_OFF))
-    patch(a9, BOOT_OFF, b"\xff\xf7\x17\xfe", thumb_bl(BASE + BOOT_OFF, BASE + STUB_OFF),
-          "arm9 bl IplSetBootFlag->stub", log)
+    patch(a9, BOOT_OFF, thumb_bl(BASE + BOOT_OFF, BASE + rev["setbootflag"]),
+          thumb_bl(BASE + BOOT_OFF, BASE + STUB_OFF), "arm9 bl IplSetBootFlag->stub", log)
 
     # ---- v7: restore the joint part1/2 CRC via arm9 dead-padding (verified safe) ----
     corr_off = (STUB_OFF + len(STUB) + 3) & ~3      # 4-align past the stub
@@ -233,15 +264,16 @@ def build(base_fw, log=print, check_timestamp=True):
     v = iplrepack.unpack(img)
     va9, va7 = v["arm9boot"], v["arm7boot"]
     cj = iplrepack.crc16_modbus(va9 + va7)
-    code_ok = (va9[0x7ab2:0x7ab4] == b"\xc0\x46" and va7[0x6e8] == 0x07 and
-               va9[0x78d0:0x78d2] == b"\xc0\x46" and va9[STUB_OFF:STUB_OFF + 2] != b"\x00\x00")
-    # confirm arm7boot is byte-identical to v6's (only the functional 0x6e8 patch)
-    a7v6 = bytearray(a7_orig); a7v6[0x6e8] = 0x07
+    h = rev["a9_hang"]
+    code_ok = (va9[h:h + 2] == b"\xc0\x46" and va7[a7_off] == a7_new and
+               va9[g9_off:g9_off + 2] == b"\xc0\x46" and va9[STUB_OFF:STUB_OFF + 2] != b"\x00\x00")
+    # confirm arm7boot is byte-identical to v6's (only the functional gate patch)
+    a7v6 = bytearray(a7_orig); a7v6[a7_off] = a7_new
     arm7_clean = (va7 == bytes(a7v6))
     log("\nrebuilt part1/2 CRC16 (joint) = 0x%04X  (stock 0x%04X)" % (cj, tgt_joint))
     log("  joint CRC == stock: %s" % (cj == tgt_joint))
     log("  dual-mode patches present: %s" % code_ok)
-    log("  arm7boot untouched except 0x6e8 patch (no padding edit): %s" % arm7_clean)
+    log("  arm7boot untouched except 0x%x patch (no padding edit): %s" % (a7_off, arm7_clean))
     if not (cj == tgt_joint and code_ok and arm7_clean):
         raise RuntimeError("VERIFICATION FAILED")
     return img
