@@ -139,6 +139,26 @@ assert set(TABLE_KEYS) == set(DEFAULT_PARAMS) and len(TABLE_KEYS) == len(PARAM_S
 
 ORIG_REDIR = bytes([0x80, 0xff, 0xfa, 0x00])   # jarl sub_11a4c, lp
 
+# --- Main v2.30 (2004-09-20, header version word 230) profile: AGB unlock only ----
+# 2.30's alt-mode block (0x118F4) ends with `st.h r0, 0[r28]` @0x1192E (r28 =
+# 0xF84100A: release the NTR reset) and returns -- there is no sub_11A4C call to
+# hijack, and this build has no video-out support at all (no YOKO code), so the
+# stub re-does that store, opens the GBA slot (memset(0xF843000, 0xFF, 0x200), the
+# "protection off" fill of 2.30's own agb_setBusProtection) and sets the bus control
+# bit via 2.30's agb_16F0C equivalent. Function map verified by disassembly vs 3.52.
+V230 = dict(
+    version=230,
+    hook=0x1192E, hook_orig=bytes.fromhex("7c070000"),   # st.h r0, 0[r28]
+    free_start=0x105E8, free_end=0x115E8,                # 4 KiB 0xFF run (== 3.52's 0x10618 run)
+    memset=0x18590, agb_16f0c=0x16940, ntr_reset=0xF84100A,
+    stock_xor=0xB46E7C58,                                 # region_xor32 of stock 2.30
+)
+MAGIC_230 = b"NAGB"
+
+
+def is_230(main_img):
+    return bytes(main_img[0x40:0x44]) == (230).to_bytes(4, "little")
+
 
 # --- V850E1 instruction encoders (verified vs firmware_6B0468_2025.asm) ------
 def jarl(target, pc):
@@ -303,6 +323,57 @@ def build_stub(params=None):
     return build_header(params), build_code(params)
 
 
+def build_code_230(code_nec):
+    """2.30 stub at `code_nec`: release the NTR reset (the hooked instruction), then
+    the AGB full-unlock. No video (unsupported by this Main)."""
+    v = V230
+    code = bytearray()
+
+    def J(target):
+        code.extend(jarl(target, code_nec + len(code)))
+
+    code += PREPARE_LP4
+    code += mov_imm32(v["ntr_reset"], 10) + st_h(0, 0, 10)   # st.h r0, 0[r10]: hooked store
+    code += mov_imm32(AGB_SRAM_BUF, 6)                       # memset(0xF843000, 0xFF, 0x200)
+    code += movea_r0(AGB_SRAM_FILL, 7)
+    code += movea_r0(AGB_SRAM_LEN, 8)
+    J(v["memset"])
+    code += mov_imm5_r6(1); J(v["agb_16f0c"])                # 0xF840004 tweak
+    code += DISPOSE_LP_RET
+    return bytes(code)
+
+
+def patch_main_230(main_img, fix_checksum=True, target_xor=None):
+    """AGB-unlock-only special-mode patch for a Main v2.30 image (see V230)."""
+    v = V230
+    img = bytearray(main_img)
+    hoff, fs, fe = v["hook"] - BASE, v["free_start"] - BASE, v["free_end"] - BASE
+    code_nec = v["free_start"] + len(MAGIC_230)
+    code = build_code_230(code_nec)
+    blob = MAGIC_230 + code
+    cur = bytes(img[hoff:hoff + 4])
+    tgt = jarl_target(cur, v["hook"])
+    if cur == v["hook_orig"]:
+        if any(b != 0xFF for b in img[fs:fe]):
+            raise ValueError("Main 2.30: hook is vanilla but the free run is not blank; refusing")
+    elif tgt is not None and v["free_start"] <= tgt < v["free_end"]:
+        img[fs:fe] = b"\xFF" * (fe - fs)                      # our stub: rewrite
+    else:
+        raise ValueError("Main 2.30: @0x%05X is neither the vanilla reset-release store nor "
+                         "our stub redirect; refusing to clobber it." % v["hook"])
+    img[fs:fs + len(blob)] = blob
+    img[hoff:hoff + 4] = jarl(code_nec, v["hook"])
+    if fix_checksum:
+        if target_xor is None:
+            target_xor = v["stock_xor"]
+        coff = fe - 4
+        correction = region_xor32(img) ^ (target_xor & 0xFFFFFFFF)
+        old = int.from_bytes(img[coff:coff + 4], "little")
+        img[coff:coff + 4] = (old ^ correction).to_bytes(4, "little")
+        assert region_xor32(img) == (target_xor & 0xFFFFFFFF)
+    return bytes(img)
+
+
 def parse_stub(main_img):
     """Read the video-config params out of a (full 0x20000) Main image's stub region.
     Returns a params dict if our signature is present and the layout matches, else None."""
@@ -320,6 +391,10 @@ def parse_stub(main_img):
 def stub_present(main_img):
     """True if the redirect at 0x11952 already points into the free stub region
     (an alt-mode stub of ours is installed), regardless of signature/version."""
+    if is_230(main_img):
+        v = V230
+        tgt = jarl_target(bytes(main_img[v["hook"] - BASE:v["hook"] - BASE + 4]), v["hook"])
+        return tgt is not None and v["free_start"] <= tgt < v["free_end"]
     roff = REDIR_NEC - BASE
     tgt = jarl_target(bytes(main_img[roff:roff + 4]), REDIR_NEC)
     return tgt is not None and FREE_START <= tgt < FREE_END
@@ -345,6 +420,8 @@ def patch_main(main_img, params=None, fix_checksum=True, target_xor=None):
         raise ValueError("Main image must be 0x%X bytes (got 0x%X)" % (MAIN_SIZE, len(img)))
     if img[:19] != b"INTELLIGENT SYSTEMS" or img[0x20:0x2C] != b"Main Program":
         raise ValueError("not a Main Program region image (header mismatch)")
+    if is_230(img):
+        return patch_main_230(img, fix_checksum=fix_checksum, target_xor=target_xor)   # params ignored (no video)
 
     roff = REDIR_NEC - BASE
     tgt = jarl_target(bytes(img[roff:roff + 4]), REDIR_NEC)
@@ -464,6 +541,29 @@ def _selftest():
     assert p1[:FREE_START - BASE] == p0[:FREE_START - BASE]
     assert p1[REDIR_NEC - BASE:REDIR_NEC - BASE + 4] == p0[REDIR_NEC - BASE:REDIR_NEC - BASE + 4]
 
+    # --- Main 2.30 profile ---
+    v = V230
+    m = bytearray(b"\xFF" * MAIN_SIZE)
+    m[0:19] = b"INTELLIGENT SYSTEMS"; m[0x20:0x2C] = b"Main Program"
+    m[0x40:0x44] = (230).to_bytes(4, "little")
+    m[v["hook"] - BASE:v["hook"] - BASE + 4] = v["hook_orig"]
+    m[0x3000:0x3040] = bytes(range(64))
+    q = patch_main(bytes(m))
+    assert is_230(q) and stub_present(q) and parse_stub(q) is None
+    code_nec = v["free_start"] + len(MAGIC_230)
+    assert jarl_target(q[v["hook"] - BASE:v["hook"] - BASE + 4], v["hook"]) == code_nec
+    c230 = build_code_230(code_nec)
+    t230 = {jarl_target(c230[i:i + 4], code_nec + i) for i in range(0, len(c230) - 3, 2)} - {None}
+    assert {v["memset"], v["agb_16f0c"]} <= t230, "2.30 stub must call memset + agb_16F0C"
+    assert c230[4:14] == mov_imm32(v["ntr_reset"], 10) + st_h(0, 0, 10), "2.30 stub must redo the reset-release store"
+    assert region_xor32(q) == v["stock_xor"], "2.30 patch must be checksum-neutral"
+    assert patch_main(q) == q, "2.30 re-patch not idempotent"
+    try:
+        bad = bytearray(m); bad[v["hook"] - BASE:v["hook"] - BASE + 4] = b"\x00\x00\x00\x00"
+        patch_main(bytes(bad)); raise AssertionError("2.30 unknown hook must be refused")
+    except ValueError:
+        pass
+
     print("altmode_video_patch selftest PASSED (stub %d bytes: %d header + %d code; "
           "checksum-neutral, default target 0x%08X)"
           % (HEADER_LEN + len(build_code(None)), HEADER_LEN, len(build_code(None)),
@@ -494,6 +594,11 @@ def _cli(argv):
     open(outfile, "wb").write(out)
     p = parse_stub(out)
     print("patched %s -> %s" % (args.infile, outfile))
+    if is_230(img):
+        v = V230
+        print("  Main v2.30: AGB-unlock-only stub @ NEC 0x%05X, hook @ 0x%05X; region XOR-32 = "
+              "0x%08X (stock 0x%08X)" % (v["free_start"], v["hook"], region_xor32(out), v["stock_xor"]))
+        return
     print("  stub @ NEC 0x%05X (magic %s), code @ 0x%05X, redirect @ 0x%05X"
           % (STUB_NEC, MAGIC.decode(), CODE_NEC, REDIR_NEC))
     for key, label, *_ in PARAM_SPECS:

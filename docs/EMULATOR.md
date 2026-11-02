@@ -375,6 +375,13 @@ Default values: X `196`, X dual `344`, Y `46`, Y dual `46`, gap `8`, interlaced,
 black background, cursor hidden, monitor state `0x16`. Flash the result with *Update
 Main Prog*.
 
+**Main v2.30** (2004-09-20, header version word 230) is also supported, AGB-unlock only: its
+alt-mode block (`0x118F4`) ends in `st.h r0, 0[r28]` at `0x1192E` (release the NTR reset) with no
+final-init call to hijack, so that store is redirected to a stub in the free run at `0x105E8`
+(`NAGB` magic) that re-does the store, fills `0x0F843000` with `FF` × 0x200 via 2.30's `memset`
+(`0x18590`) and calls its bus-control routine (`0x16940`). 2.30 has no video-out code at all, so
+no video settings. Checksum-neutral to 2.30's own stock XOR-32 `0xB46E7C58`.
+
 ## Open questions
 
 - An encrypted exchange ISND runs after booting the firmware menu: `0xC1` (8-byte

@@ -1306,6 +1306,14 @@ class App:
                 "'INTELLIGENT SYSTEMS' / 'Main Program' header)." % avp.MAIN_SIZE)
             return
 
+        if avp.is_230(main):
+            if messagebox.askokcancel(
+                    "Special Mode Patch",
+                    "Main v2.30 detected. This build has no video-out support, so only "
+                    "the alt-mode GBA-slot unlock will be installed (no video settings).\n\n"
+                    "Continue?"):
+                self._save_altmode_video(src, main, None)
+            return
         params = avp.parse_stub(main)
         present = avp.stub_present(main)
         self._open_altmode_video_dialog(src, main, params, present)
@@ -1425,6 +1433,16 @@ class App:
 
         def fn(log):
             log("  source: %s (%d bytes)" % (os.path.basename(src), len(main)))
+            if newp is None:                      # Main v2.30: AGB unlock only
+                log("  Main v2.30: AGB-unlock-only stub @0x%05X, hook @0x%05X, XOR-32 0x%08X "
+                    "(stock 0x%08X)" % (avp.V230["free_start"], avp.V230["hook"],
+                                        avp.region_xor32(patched), avp.V230["stock_xor"]))
+                with open(out, "wb") as f:
+                    f.write(patched)
+                log("  wrote %d bytes -> %s" % (len(patched), out))
+                log("  md5: %s" % hashlib.md5(patched).hexdigest())
+                log("  Now flash it with 'Update Main Prog…' while the unit is connected.")
+                return
             log("  video stub configured:")
             for key, label, *_ in avp.PARAM_SPECS:
                 log("    %-26s = %d (0x%X)" % (label, newp[key], newp[key]))
