@@ -134,8 +134,9 @@ assert len(STUB_CODE) == 20
 # instead of 6.7) into BOTH words before storing. Gives the box's slot-1 bridge
 # twice the setup time per bit; retail carts just boot a little slower. Meant for
 # flashcarts (tight FPGA timings) that fail through the bridge. Normal mode is
-# untouched (the branch is isOnDebugger == 0 only). Hardware-validated 2026-11-02:
-# an Acekard went from blank banner to booting on an LCA3 rev-C unit (2004 IPL).
+# untouched (the branch is isOnDebugger == 0 only). Hardware result 2026-11-02 (rev-C
+# unit, 2004 IPL): fixes the firmware-side reads (banner shows, loader launches); the
+# flashcart's own card driver then hangs on its own hardcoded timing -- out of reach.
 #     ldr r3,=0x08000000 ; orrs r1,r3 ; str r1,[r2] ; ldr r0,[r2,#4]
 #     orrs r0,r3 ; str r0,[r2,#4] ; bx lr ; nop ; .word 0x08000000
 CARD_SLOW_STUB = bytes.fromhex("034b194311605068184350607047c04600000008")

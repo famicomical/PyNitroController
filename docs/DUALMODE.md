@@ -113,7 +113,9 @@ alt-mode-only patch: `IplInit`'s alt branch, which already ORs bits into the car
 word at `0x60`, is redirected to a 20-byte stub in the same dead run that ORs ROMCTRL bit 27
 (4.2 MHz card clock instead of 6.7 MHz) into both header timing words (`0x60` normal commands,
 `0x64` KEY1 commands) before storing them. Retail carts just boot a little slower; normal mode is
-untouched. Hardware-validated: an Acekard that showed a blank banner through the bridge boots with it.
+untouched. Hardware-validated as far as it reaches: an Acekard that showed a blank banner through the
+bridge shows it and its loader launches, then hangs — the loader's own card driver uses its own
+(hardcoded) timing, which no firmware patch controls. Retail carts are unaffected either way.
 
 ## Flash it
 
